@@ -656,6 +656,10 @@ pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
 /// 设置供应商配置（原始 JSON）
 ///
 /// 写入到 `models.providers`
+/// **当前未接线**：自 v3.20.3-relay.2 起 OpenClaw 采用本地路由转发，CC Switch 不再把
+/// 供应商写进它的配置文件。保留实现是为了让既有测试仍能覆盖配置格式的解析逻辑；
+/// **不要**在代理相关路径上调用它，否则会破坏用户自己维护的配置文件。
+#[allow(dead_code)]
 pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOutcome, AppError> {
     let mut full_config = read_openclaw_config()?;
     let root = ensure_object(&mut full_config);
@@ -680,6 +684,8 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
 }
 
 /// 删除供应商配置
+/// 同 [`set_provider`]：当前未接线，保留供既有测试使用。
+#[allow(dead_code)]
 pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
     let mut removed = false;
@@ -729,6 +735,8 @@ pub fn get_typed_providers() -> Result<IndexMap<String, OpenClawProviderConfig>,
 }
 
 /// 设置供应商配置（类型化）
+/// 同 [`set_provider`]：当前未接线，保留供既有测试使用。
+#[allow(dead_code)]
 pub fn set_typed_provider(
     id: &str,
     config: &OpenClawProviderConfig,

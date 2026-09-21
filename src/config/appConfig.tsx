@@ -77,17 +77,16 @@ export function isProxyAppId(appId: string): appId is ProxyAppId {
   return (PROXY_APP_IDS as string[]).includes(appId);
 }
 
-export type AdditiveAppId = Extract<
-  AppId,
-  "opencode" | "openclaw" | "hermes" | "pi"
->;
+export type AdditiveAppId = Extract<AppId, "pi">;
 
-export const ADDITIVE_APP_IDS: AdditiveAppId[] = [
-  "opencode",
-  "openclaw",
-  "hermes",
-  "pi",
-];
+/**
+ * 增量模式应用：供应商共存于原生配置、可独立启用（目前仅 Pi）。
+ *
+ * OpenCode / OpenClaw / Hermes 已改为本地路由转发（CC Switch 不再改写它们的配置
+ * 文件），因此按切换模式处理。若把它们留在这里，UI 会用 `isInConfig` 判断状态，
+ * 供应商将永远显示为「未添加」——而代理需要的是 `isCurrent`。
+ */
+export const ADDITIVE_APP_IDS: AdditiveAppId[] = ["pi"];
 
 export function isAdditiveAppId(appId: string): appId is AdditiveAppId {
   return (ADDITIVE_APP_IDS as string[]).includes(appId);

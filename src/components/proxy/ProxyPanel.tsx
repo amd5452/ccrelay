@@ -9,6 +9,7 @@ import {
   Loader2,
   Zap,
   Power,
+  Copy,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -35,6 +36,21 @@ import {
   PROXY_APP_IDS,
   type ProxyAppId,
 } from "@/config/appConfig";
+
+/**
+ * 需要用户**手动**把地址填进智能体的应用（OpenCode / OpenClaw / Hermes）。
+ *
+ * 这三个应用的配置文件格式各不相同，CC Switch 不再改写它们；改为提供一个
+ * OpenAI 兼容的本地端点，用户自己填到智能体的「模型地址」里，模型名随便填一个
+ * 占位符即可（代理会用该供应商配置里的真实模型覆盖）。
+ *
+ * 路径规则与 Rust 侧 `ProxyService::proxy_base_url_for_app` 一致：`{origin}/{app}/v1`。
+ */
+function isManualConfigApp(appType: string): boolean {
+  return (
+    appType === "opencode" || appType === "openclaw" || appType === "hermes"
+  );
+}
 
 interface ProxyPanelProps {
   enableLocalProxy: boolean;
@@ -282,21 +298,54 @@ export function ProxyPanel({
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                   {PROXY_APP_IDS.map((appType) => {
                     const isEnabled = takeoverStatus?.[appType] ?? false;
+                    // OpenCode / OpenClaw / Hermes 不改写智能体的配置文件，需要用户
+                    // 手动把地址填进去。开启接管后就把可复制的端点显示出来，否则用户
+                    // 无从得知该填什么。
+                    const manualUrl =
+                      isEnabled && isManualConfigApp(appType)
+                        ? `${formatAddressForUrl(status!.address, status!.port)}/${appType}/v1`
+                        : null;
                     return (
                       <div
                         key={appType}
-                        className="flex items-center justify-between rounded-md border border-primary/20 bg-background/60 px-3 py-2"
+                        className="rounded-md border border-primary/20 bg-background/60 px-3 py-2"
                       >
-                        <span className="text-sm font-medium">
-                          {getAppLabel(appType)}
-                        </span>
-                        <Switch
-                          checked={isEnabled}
-                          onCheckedChange={(checked) =>
-                            handleTakeoverChange(appType, checked)
-                          }
-                          disabled={setTakeoverForApp.isPending}
-                        />
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            {getAppLabel(appType)}
+                          </span>
+                          <Switch
+                            checked={isEnabled}
+                            onCheckedChange={(checked) =>
+                              handleTakeoverChange(appType, checked)
+                            }
+                            disabled={setTakeoverForApp.isPending}
+                          />
+                        </div>
+                        {manualUrl && (
+                          <button
+                            type="button"
+                            className="mt-1.5 flex w-full items-center gap-1 rounded border border-border/60 bg-muted/40 px-1.5 py-1 text-left transition-colors hover:bg-muted"
+                            title={t("proxy.takeover.manualCopyHint", {
+                              defaultValue:
+                                "点击复制，填到该智能体的模型地址里；模型名随便填一个占位符即可",
+                            })}
+                            onClick={() => {
+                              navigator.clipboard.writeText(manualUrl);
+                              toast.success(
+                                t("proxy.panel.addressCopied", {
+                                  defaultValue: "地址已复制",
+                                }),
+                                { closeButton: true },
+                              );
+                            }}
+                          >
+                            <Copy className="h-3 w-3 shrink-0 text-muted-foreground" />
+                            <code className="truncate font-mono text-[10px] text-muted-foreground">
+                              {manualUrl}
+                            </code>
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -304,7 +353,7 @@ export function ProxyPanel({
                 <p className="text-xs text-muted-foreground">
                   {t("proxy.takeover.hint", {
                     defaultValue:
-                      "选择要接管的应用，启用后该应用的请求将通过本地代理转发",
+                      "选择要接管的应用，启用后该应用的请求将通过本地代理转发。OpenCode / OpenClaw / Hermes 不会改写配置文件——开启后请点击下方地址复制到智能体的模型地址里。",
                   })}
                 </p>
               </div>

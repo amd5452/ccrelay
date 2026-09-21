@@ -414,6 +414,13 @@ impl AppType {
     /// - Switch mode (false): Only the current provider is written to live config (Claude, Codex, Gemini)
     /// - Additive mode (true): Providers coexist in native config and can be enabled independently
     ///   (OpenCode, OpenClaw, Hermes, Pi)
+    ///
+    /// 注意：OpenCode / OpenClaw / Hermes 虽然已改为本地路由转发（CC Switch 不再改写它们
+    /// 的 live 配置），但**仍保留在增量模式**。因为 `AppType::OpenCode` 同时承载 OMO
+    /// （Oh My OpenCode）——它依赖增量模式的文件写入流程，翻转此判定会连带破坏 OMO。
+    ///
+    /// 「代理需要 is_current」这件事由 `ProviderService::switch_normal` 单独处理，
+    /// 不再借道本函数。
     pub fn is_additive_mode(&self) -> bool {
         matches!(
             self,

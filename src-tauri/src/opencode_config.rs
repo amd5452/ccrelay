@@ -154,6 +154,10 @@ pub fn get_providers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
+/// **当前未接线**：自 v3.20.3-relay.2 起 OpenCode 采用本地路由转发，CC Switch 不再把
+/// 供应商写进它的配置文件。保留实现是为了让既有测试仍能覆盖配置格式的解析逻辑；
+/// **不要**在代理相关路径上调用它，否则会破坏用户自己维护的配置文件。
+#[allow(dead_code)]
 pub fn set_provider(id: &str, config: Value) -> Result<(), AppError> {
     let _guard = opencode_config_lock().lock()?;
     let path = get_opencode_config_path();
@@ -179,6 +183,8 @@ pub fn set_provider(id: &str, config: Value) -> Result<(), AppError> {
     write_opencode_config_to_path_with_contents(&path, &full_config).map(|_| ())
 }
 
+/// 同 [`set_provider`]：当前未接线，保留供既有测试使用。
+#[allow(dead_code)]
 pub fn remove_provider(id: &str) -> Result<(), AppError> {
     let _guard = opencode_config_lock().lock()?;
     let path = get_opencode_config_path();
@@ -211,6 +217,8 @@ pub fn get_typed_providers() -> Result<IndexMap<String, OpenCodeProviderConfig>,
     Ok(result)
 }
 
+/// 同 [`set_provider`]：当前未接线，保留供既有测试使用。
+#[allow(dead_code)]
 pub fn set_typed_provider(id: &str, config: &OpenCodeProviderConfig) -> Result<(), AppError> {
     let value = serde_json::to_value(config).map_err(|e| AppError::JsonSerialize { source: e })?;
     set_provider(id, value)

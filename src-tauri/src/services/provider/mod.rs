@@ -2249,13 +2249,21 @@ requires_openai_auth = true
         });
     }
 
+    /// 核心不变量：OpenCode 采用本地路由转发后，同步**不得**改动用户自己维护的 live
+    /// 配置——即使数据库里存在同名供应商、即使它的配置被更新过。
+    ///
+    /// 这条断言是「不破坏用户配置」的回归守卫：若将来有人把写入逻辑加回来，它会立刻失败。
     #[test]
     #[serial]
-    fn sync_current_provider_for_app_preserves_legacy_live_opencode_provider() {
+    fn sync_current_provider_for_app_leaves_legacy_live_opencode_provider_untouched() {
         with_test_home(|state, _| {
             let provider = opencode_provider("legacy-opencode");
+            // 模拟「用户在智能体里自己维护的配置」
             crate::opencode_config::set_provider(&provider.id, provider.settings_config.clone())
                 .expect("seed opencode live provider");
+            let live_before =
+                crate::opencode_config::get_providers().expect("read opencode providers before");
+
             state
                 .db
                 .save_provider(AppType::OpenCode.as_str(), &provider)
@@ -2271,46 +2279,60 @@ requires_openai_auth = true
             ProviderService::sync_current_provider_for_app(state, AppType::OpenCode)
                 .expect("sync legacy opencode provider");
 
-            let live_providers =
-                crate::opencode_config::get_providers().expect("read opencode providers");
+            let live_after =
+                crate::opencode_config::get_providers().expect("read opencode providers after");
             assert_eq!(
-                live_providers
-                    .get(&provider.id)
-                    .and_then(|config| config.get("options"))
-                    .and_then(|options| options.get("apiKey")),
-                Some(&Value::String("updated-key".to_string())),
-                "legacy provider that already exists in live should still be synced"
+                live_before, live_after,
+                "同步不得改动 OpenCode 的 live 配置（供应商由用户自行维护）"
+            );
+
+            // 但数据库里的更新必须生效——供应商的唯一来源是数据库
+            let saved = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::OpenCode.as_str())
+                .expect("query opencode provider")
+                .expect("opencode provider should exist");
+            assert_eq!(
+                saved.settings_config["options"]["apiKey"],
+                Value::String("updated-key".to_string()),
+                "数据库中的更新仍应生效"
             );
         });
     }
 
+    /// 同 [`sync_current_provider_for_app_leaves_legacy_live_opencode_provider_untouched`]：
+    /// 即使 live 配置为空（用户没手动配过），同步也不得把数据库里的供应商写进去。
+    ///
+    /// 新模式下用户是自己在 OpenCode 里把接口地址指向本地代理的，CC Switch 不介入其配置。
     #[test]
     #[serial]
-    fn sync_current_provider_for_app_restores_legacy_opencode_provider_after_live_reset() {
+    fn sync_current_provider_for_app_does_not_write_opencode_provider_into_live() {
         with_test_home(|state, _| {
-            let provider = opencode_provider("legacy-opencode-reset");
+            let provider = opencode_provider("db-only-opencode");
             state
                 .db
                 .save_provider(AppType::OpenCode.as_str(), &provider)
-                .expect("seed legacy opencode provider in db");
+                .expect("seed db-only opencode provider");
 
             ProviderService::sync_current_provider_for_app(state, AppType::OpenCode)
-                .expect("sync legacy opencode provider after reset");
+                .expect("sync db-only opencode provider");
 
             let live_providers =
                 crate::opencode_config::get_providers().expect("read opencode providers");
             assert!(
-                live_providers.contains_key(&provider.id),
-                "legacy opencode provider should be restored when live config is reset"
+                !live_providers.contains_key(&provider.id),
+                "OpenCode 采用本地路由转发，供应商不得被写进 live 配置"
             );
         });
     }
 
+    /// 同 [`sync_current_provider_for_app_leaves_legacy_live_opencode_provider_untouched`]，
+    /// OpenClaw 版本。
     #[test]
     #[serial]
-    fn sync_current_provider_for_app_restores_legacy_openclaw_provider_after_live_reset() {
+    fn sync_current_provider_for_app_does_not_write_openclaw_provider_into_live() {
         with_test_home(|state, _| {
-            let mut provider = openclaw_provider("legacy-openclaw-reset");
+            let mut provider = openclaw_provider("db-only-openclaw");
             provider.settings_config["models"] = json!([
                 {
                     "id": "claude-sonnet-4",
@@ -2320,16 +2342,16 @@ requires_openai_auth = true
             state
                 .db
                 .save_provider(AppType::OpenClaw.as_str(), &provider)
-                .expect("seed legacy openclaw provider in db");
+                .expect("seed db-only openclaw provider");
 
             ProviderService::sync_current_provider_for_app(state, AppType::OpenClaw)
-                .expect("sync legacy openclaw provider after reset");
+                .expect("sync db-only openclaw provider");
 
             let live_providers =
                 crate::openclaw_config::get_providers().expect("read openclaw providers");
             assert!(
-                live_providers.contains_key(&provider.id),
-                "legacy openclaw provider should be restored when live config is reset"
+                !live_providers.contains_key(&provider.id),
+                "OpenClaw 采用本地路由转发，供应商不得被写进 live 配置"
             );
         });
     }
@@ -5447,8 +5469,16 @@ impl ProviderService {
                 live::preflight_codex_live_write_for_state(state, provider)?;
             }
 
-            // Additive mode apps skip setting is_current (no such concept).
-            if !app_type.is_additive_mode() {
+            // 增量模式应用原本跳过设置 is_current——因为它们把供应商写进原生配置，
+            // 由应用自己决定用哪个，CC Switch 无需知道「当前」是谁。
+            //
+            // 但 OpenCode / OpenClaw / Hermes 现在改由本地代理转发，而**代理正是靠
+            // is_current 解析「该用哪个供应商」**（见 ProviderRouter::select_providers），
+            // 所以这三个必须设置，否则点「启用」后代理查不到供应商、接管直接失败。
+            //
+            // 只有 Pi 例外：它有独立的启用流程（见本函数开头的 `AppType::Pi => pi::enable`），
+            // 且其供应商读取自 Pi 自己的 models 文件。
+            if app_type != AppType::Pi {
                 crate::settings::set_current_provider(&app_type, Some(id))?;
                 state.db.set_current_provider(app_type.as_str(), id)?;
             }
@@ -5504,24 +5534,9 @@ impl ProviderService {
                 .warnings
                 .push("codex_auth_cleanup_failed".to_string());
         }
-        // Hermes is additive, so "switching" doesn't overwrite a live config file
-        // — we instead update the top-level `model:` section to point at this
-        // provider's first declared model. Without this, clicking "switch" would
-        // only shuffle entries in custom_providers[] while Hermes keeps using
-        // whatever `model.provider` was set before.
-        if matches!(app_type, AppType::Hermes) {
-            if let Err(e) =
-                crate::hermes_config::apply_switch_defaults(&provider.id, &provider.settings_config)
-            {
-                log::warn!(
-                    "Failed to update Hermes model defaults after switching to '{}': {e}",
-                    provider.id
-                );
-                result
-                    .warnings
-                    .push(format!("hermes_model_defaults_failed:{}", provider.id));
-            }
-        }
+        // Hermes 采用本地路由转发，不再写 live 配置：切换供应商只在数据库层面
+        // 生效，由代理在请求时决定实际使用哪个供应商。这里原本会改写 Hermes 的
+        // `model:` 段落，现在必须去掉——否则会和用户手动指向代理的配置互相打架。
 
         // For additive-mode providers that were DB-only (live_config_managed == Some(false)),
         // flip the flag to true now that the provider has been successfully written to the live

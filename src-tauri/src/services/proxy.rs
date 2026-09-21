@@ -1917,16 +1917,25 @@ impl ProxyService {
 
     /// 备份指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn backup_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
+        // 增量模式应用不写 live 配置（见 takeover_live_config_strict），因此没有需要
+        // 备份的内容——早期实现会在这里备份一份，但从 v3.20.3-relay.2 起不再接管它们的
+        // 文件，备份也就失去意义。提前返回，避免把一个空配置存进备份槽。
+        if matches!(
+            app_type,
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes
+        ) {
+            log::debug!(
+                "{} 采用本地路由转发，无 live 配置需要备份",
+                app_type.as_str()
+            );
+            return Ok(());
+        }
+
         let (app_type_str, mut config) = match app_type {
             AppType::Claude => ("claude", self.read_claude_live()?),
             AppType::Codex => ("codex", self.read_codex_live()?),
             AppType::Gemini => ("gemini", self.read_gemini_live()?),
             AppType::GrokBuild => ("grokbuild", self.read_grok_live()?),
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => (
-                app_type.as_str(),
-                crate::services::provider::ProviderService::read_live_settings(app_type.clone())
-                    .map_err(|e| format!("读取 {} Live 配置失败: {e}", app_type.as_str()))?,
-            ),
             _ => return Err("该应用不支持代理功能".to_string()),
         };
 
@@ -2168,72 +2177,24 @@ impl ProxyService {
                 log::info!("Grok Build Live 配置已接管，代理地址: {proxy_grok_base_url}");
             }
             AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+                // 增量模式应用**不改写 live 配置**：用户自己把智能体的模型地址指向本代理
+                // 提供的 OpenAI 兼容端点（界面会显示可复制的地址），模型名填占位符即可。
+                //
+                // 这里只记日志、不碰文件——三者的配置格式各不相同，逐一定制写入既复杂，
+                // 又有破坏用户既有配置的风险。
                 let proxy_app_base_url = format!(
                     "{}/{}/v1",
                     proxy_url.trim_end_matches('/'),
                     app_type.as_str()
                 );
-                self.takeover_additive_live_config(app_type, &proxy_app_base_url)?;
                 log::info!(
-                    "{} Live 配置已接管，代理地址: {proxy_app_base_url}",
+                    "{} 采用本地路由转发，未改写 live 配置；请在智能体里把接口地址设为 {proxy_app_base_url}",
                     app_type.as_str()
                 );
             }
             _ => return Err("该应用不支持代理功能".to_string()),
         }
 
-        Ok(())
-    }
-
-    /// 增量模式应用（OpenCode / OpenClaw / Hermes）的 Live 接管。
-    ///
-    /// 这些应用是「多个供应商共存于同一份原生配置」的增量模式，因此接管方式是：
-    /// 取当前供应商的配置，把其中的上游地址字段改写成代理地址后写回 Live。
-    /// 复用既有的 live 写入能力，不为新应用单独实现配置文件格式处理。
-    fn takeover_additive_live_config(
-        &self,
-        app_type: &AppType,
-        proxy_base_url: &str,
-    ) -> Result<(), String> {
-        let provider = self.require_current_provider_for_app(app_type)?;
-        let mut taken_over = provider.clone();
-        Self::override_provider_base_url(
-            &mut taken_over.settings_config,
-            app_type,
-            proxy_base_url,
-        )?;
-        crate::services::provider::live::write_live_snapshot(app_type, &taken_over)
-            .map_err(|e| format!("写入 {} 接管配置失败: {e}", app_type.as_str()))?;
-        Ok(())
-    }
-
-    /// 改写供应商配置里的上游地址字段。各应用的字段位置不同：
-    /// Hermes 用 `base_url`，OpenClaw 用 `baseUrl`（camelCase），
-    /// OpenCode 嵌在 `options.baseURL`。
-    fn override_provider_base_url(
-        config: &mut Value,
-        app_type: &AppType,
-        proxy_base_url: &str,
-    ) -> Result<(), String> {
-        match app_type {
-            AppType::Hermes => {
-                config["base_url"] = json!(proxy_base_url);
-                config["api_key"] = json!(PROXY_TOKEN_PLACEHOLDER);
-            }
-            AppType::OpenClaw => {
-                config["baseUrl"] = json!(proxy_base_url);
-                config["apiKey"] = json!(PROXY_TOKEN_PLACEHOLDER);
-            }
-            AppType::OpenCode => {
-                let options = config
-                    .get_mut("options")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(|| "OpenCode 供应商配置缺少 options 字段".to_string())?;
-                options.insert("baseURL".to_string(), json!(proxy_base_url));
-                options.insert("apiKey".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
-            }
-            _ => return Err(format!("{} 不支持增量接管", app_type.as_str())),
-        }
         Ok(())
     }
 
@@ -2472,25 +2433,11 @@ impl ProxyService {
             AppType::Codex => self.write_codex_restore_backup(config),
             AppType::Gemini => self.write_gemini_live(config),
             AppType::GrokBuild => self.write_grok_live(config),
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
-                self.restore_additive_live_for_app(app_type)
-            }
+            // 增量模式应用从不写 live 配置（见 takeover_live_config_strict），
+            // 因此也没有需要「恢复」或「清理」的内容。
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Ok(()),
             _ => Err("该应用不支持代理功能".to_string()),
         }
-    }
-
-    /// 增量模式应用（OpenCode / OpenClaw / Hermes）的 Live 恢复。
-    ///
-    /// 这些应用的 Live 备份是整份原生配置，直接写回会覆盖同一文件里的其它供应商，
-    /// 因此统一用当前供应商的 SSOT 重建 Live。
-    fn restore_additive_live_for_app(&self, app_type: &AppType) -> Result<(), String> {
-        if self.restore_live_from_ssot_for_app(app_type)? {
-            return Ok(());
-        }
-        Err(format!(
-            "{} 缺少可用的当前供应商，无法重建 Live 配置",
-            app_type.as_str()
-        ))
     }
 
     pub fn detect_takeover_in_live_config_for_app(&self, app_type: &AppType) -> bool {
@@ -2586,9 +2533,9 @@ impl ProxyService {
             AppType::Codex => self.cleanup_codex_takeover_placeholders_in_live(),
             AppType::Gemini => self.cleanup_gemini_takeover_placeholders_in_live(),
             AppType::GrokBuild => self.cleanup_grok_takeover_placeholders_in_live(),
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
-                self.restore_additive_live_for_app(app_type)
-            }
+            // 增量模式应用从不写 live 配置（见 takeover_live_config_strict），
+            // 因此也没有需要「恢复」或「清理」的内容。
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Ok(()),
             _ => Ok(()),
         }
     }

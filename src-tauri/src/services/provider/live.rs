@@ -1326,109 +1326,18 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
         AppType::GrokBuild => {
             crate::grok_config::write_grok_provider_live(provider)?;
         }
-        AppType::OpenCode => {
-            // OpenCode uses additive mode - write provider to config
-            use crate::opencode_config;
-            use crate::provider::OpenCodeProviderConfig;
-
-            // Defensive check: if settings_config is a full config structure, extract provider fragment
-            let config_to_write = if let Some(obj) = provider.settings_config.as_object() {
-                // Detect full config structure (has $schema or top-level provider field)
-                if obj.contains_key("$schema") || obj.contains_key("provider") {
-                    log::warn!(
-                        "OpenCode provider '{}' has full config structure in settings_config, attempting to extract fragment",
-                        provider.id
-                    );
-                    // Try to extract from provider.{id}
-                    obj.get("provider")
-                        .and_then(|p| p.get(&provider.id))
-                        .cloned()
-                        .unwrap_or_else(|| provider.settings_config.clone())
-                } else {
-                    provider.settings_config.clone()
-                }
-            } else {
-                provider.settings_config.clone()
-            };
-
-            // Convert settings_config to OpenCodeProviderConfig
-            let opencode_config_result =
-                serde_json::from_value::<OpenCodeProviderConfig>(config_to_write.clone());
-
-            match opencode_config_result {
-                Ok(config) => {
-                    opencode_config::set_typed_provider(&provider.id, &config)?;
-                    log::info!("OpenCode provider '{}' written to live config", provider.id);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse OpenCode provider config for '{}': {}",
-                        provider.id,
-                        e
-                    );
-                    // Only write if config looks like a valid provider fragment
-                    if config_to_write.get("npm").is_some()
-                        || config_to_write.get("options").is_some()
-                    {
-                        opencode_config::set_provider(&provider.id, config_to_write)?;
-                        log::info!(
-                            "OpenCode provider '{}' written as raw JSON to live config",
-                            provider.id
-                        );
-                    } else {
-                        return Err(AppError::Message(format!(
-                            "OpenCode provider '{}' has invalid config structure for live config (must contain 'npm' or 'options')",
-                            provider.id
-                        )));
-                    }
-                }
-            }
-        }
-        AppType::OpenClaw => {
-            // OpenClaw uses additive mode - write provider to config
-            use crate::openclaw_config;
-            use crate::openclaw_config::OpenClawProviderConfig;
-
-            // Convert settings_config to OpenClawProviderConfig
-            let openclaw_config_result =
-                serde_json::from_value::<OpenClawProviderConfig>(provider.settings_config.clone());
-
-            match openclaw_config_result {
-                Ok(config) => {
-                    openclaw_config::set_typed_provider(&provider.id, &config)?;
-                    log::info!("OpenClaw provider '{}' written to live config", provider.id);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse OpenClaw provider config for '{}': {}",
-                        provider.id,
-                        e
-                    );
-                    // Try to write as raw JSON if it looks valid
-                    if provider.settings_config.get("baseUrl").is_some()
-                        || provider.settings_config.get("api").is_some()
-                        || provider.settings_config.get("models").is_some()
-                    {
-                        openclaw_config::set_provider(
-                            &provider.id,
-                            provider.settings_config.clone(),
-                        )?;
-                        log::info!(
-                            "OpenClaw provider '{}' written as raw JSON to live config",
-                            provider.id
-                        );
-                    } else {
-                        return Err(AppError::Message(format!(
-                            "OpenClaw provider '{}' has invalid config structure for live config (must contain 'baseUrl', 'api', or 'models')",
-                            provider.id
-                        )));
-                    }
-                }
-            }
-        }
-        AppType::Hermes => {
-            crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())?;
-            log::debug!("Hermes provider '{}' written to live config", provider.id);
+        // 增量模式应用（OpenCode / OpenClaw / Hermes）：**不写配置文件**。
+        //
+        // 这三个应用改由本地代理接管转发：用户在智能体里把模型地址指向
+        // `http://127.0.0.1:15721/<app>/v1`，模型名随便填一个占位符即可
+        // （代理会用该供应商配置里的真实模型覆盖）。既然不再需要把供应商写进
+        // 原生配置，这里一律不做文件写入——三者的配置格式各不相同，逐一定制写入
+        // 既复杂，又有破坏用户既有配置的风险。
+        //
+        // 供应商本身仍然保存在数据库里（代理转发需要 base_url / key / 模型），
+        // 只是不再同步到 live 文件。
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+            log::debug!("{app_type:?} 采用本地路由转发，不写 live 配置（供应商仅存于数据库）");
         }
         AppType::Pi => {
             return Err(AppError::InvalidInput(
@@ -1771,50 +1680,13 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
                 "config": config_obj
             }))
         }
-        AppType::OpenCode => {
-            use crate::opencode_config::{get_opencode_config_path, read_opencode_config};
-
-            let config_path = get_opencode_config_path();
-            if !config_path.exists() {
-                return Err(AppError::localized(
-                    "opencode.config.missing",
-                    "OpenCode 配置文件不存在",
-                    "OpenCode configuration file not found",
-                ));
-            }
-
-            let config = read_opencode_config()?;
-            Ok(config)
-        }
         AppType::GrokBuild => crate::grok_config::read_grok_live_settings(),
-        AppType::OpenClaw => {
-            use crate::openclaw_config::{get_openclaw_config_path, read_openclaw_config};
-
-            let config_path = get_openclaw_config_path();
-            if !config_path.exists() {
-                return Err(AppError::localized(
-                    "openclaw.config.missing",
-                    "OpenClaw 配置文件不存在",
-                    "OpenClaw configuration file not found",
-                ));
-            }
-
-            let config = read_openclaw_config()?;
-            Ok(config)
-        }
-        AppType::Hermes => {
-            let config_path = crate::hermes_config::get_hermes_config_path();
-            if !config_path.exists() {
-                return Err(AppError::localized(
-                    "hermes.config.missing",
-                    "Hermes 配置文件不存在",
-                    "Hermes configuration file not found",
-                ));
-            }
-            let yaml_config = crate::hermes_config::read_hermes_config()?;
-            let config = crate::hermes_config::yaml_to_json(&yaml_config)?;
-            Ok(config)
-        }
+        // 增量模式应用（OpenCode / OpenClaw / Hermes）采用本地路由转发，不再读写各自
+        // 的 live 配置：供应商的唯一来源是数据库。
+        //
+        // 这里返回空对象而不是报错——调用方（例如接管流程里的 live → DB 同步）拿到
+        // 空配置会安全跳过，返回 Err 反而会中断接管流程。
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Ok(json!({})),
         AppType::Pi => Err(AppError::InvalidInput(
             "Pi providers are read from Pi's native models file".to_string(),
         )),
@@ -2091,17 +1963,10 @@ pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
 /// This is specific to OpenCode's additive mode - removing a provider
 /// from the opencode.json file.
 pub(crate) fn remove_opencode_provider_from_live(provider_id: &str) -> Result<(), AppError> {
-    use crate::opencode_config;
-
-    // Check if OpenCode config directory exists
-    if !opencode_config::get_opencode_dir().exists() {
-        log::debug!("OpenCode config directory doesn't exist, skipping removal of '{provider_id}'");
-        return Ok(());
-    }
-
-    opencode_config::remove_provider(provider_id)?;
-    log::info!("OpenCode provider '{provider_id}' removed from live config");
-
+    // 增量模式应用不再写 live 配置（见 write_live_snapshot 的说明），因此这里也不
+    // 从配置文件里删除供应商——否则用户在 CC 里删掉一个供应商，会连带删掉他真实配置
+    // 里的对应条目，造成数据丢失。供应商只从数据库删除。
+    log::debug!("OpenCode 采用本地路由转发，不触碰 live 配置（跳过删除 '{provider_id}'）");
     Ok(())
 }
 
@@ -2341,17 +2206,8 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
 /// This removes a specific provider from ~/.hermes/config.yaml
 /// without affecting other providers in the file.
 pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppError> {
-    use crate::hermes_config;
-
-    // Check if Hermes config directory exists
-    if !hermes_config::get_hermes_dir().exists() {
-        log::debug!("Hermes config directory doesn't exist, skipping removal of '{provider_id}'");
-        return Ok(());
-    }
-
-    hermes_config::remove_provider(provider_id)?;
-    log::info!("Hermes provider '{provider_id}' removed from live config");
-
+    // 同 OpenCode：增量模式应用不触碰 live 配置，避免误删用户真实配置里的供应商。
+    log::debug!("Hermes 采用本地路由转发，不触碰 live 配置（跳过删除 '{provider_id}'）");
     Ok(())
 }
 
@@ -2360,17 +2216,8 @@ pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppErro
 /// This removes a specific provider from ~/.openclaw/openclaw.json
 /// without affecting other providers in the file.
 pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppError> {
-    use crate::openclaw_config;
-
-    // Check if OpenClaw config directory exists
-    if !openclaw_config::get_openclaw_dir().exists() {
-        log::debug!("OpenClaw config directory doesn't exist, skipping removal of '{provider_id}'");
-        return Ok(());
-    }
-
-    openclaw_config::remove_provider(provider_id)?;
-    log::info!("OpenClaw provider '{provider_id}' removed from live config");
-
+    // 同 OpenCode：增量模式应用不触碰 live 配置，避免误删用户真实配置里的供应商。
+    log::debug!("OpenClaw 采用本地路由转发，不触碰 live 配置（跳过删除 '{provider_id}'）");
     Ok(())
 }
 

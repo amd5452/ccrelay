@@ -1264,6 +1264,18 @@ impl RequestForwarder {
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
         }
 
+        // 增量模式应用（OpenCode / OpenClaw / Hermes）走本地路由转发：客户端在配置里
+        // 填的模型名通常只是占位符，这里统一用供应商配置里的真实模型覆盖。
+        //
+        // 该函数还会先看占位符是否命中该供应商声明的模型目录——命中就尊重客户端的
+        // 选择，因此「填占位符」和「填真实模型名」两种用法都能工作。
+        if matches!(
+            app_type,
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes
+        ) {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
+
         if is_copilot {
             mapped_body =
                 super::providers::copilot_model_map::apply_copilot_model_normalization(mapped_body);
